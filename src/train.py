@@ -1,107 +1,126 @@
-import pandas as pd, joblib, os
+# src/train.py
+import os
+import joblib
+import pandas as pd
+import numpy as np
+import wandb
+from huggingface_hub import HfApi
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import RidgeClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-import mlflow, optuna
-from huggingface_hub import HfApi
+import optuna
 
-mlflow.set_tracking_uri(os.getenv('MLFLOW_TRACKING_URI'))
-mlflow.set_experiment('Loan_Approval_Models')
+# ENV
+HF_TOKEN = os.getenv("HF_TOKEN")
+HF_MODEL_REPO = os.getenv("HF_MODEL_REPO")
+WANDB_PROJECT = os.getenv("WANDB_PROJECT", "loan-approval")
+WANDB_API_KEY = os.getenv("WANDB_API_KEY")
 
-X, y = pd.read_csv('data/X.csv'), pd.read_csv('data/y.csv').values.ravel()
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# Load processed data
+X = pd.read_csv("data/X.csv")
+y = pd.read_csv("data/y.csv").values.ravel().astype(int)
+
+# Load preprocess artifacts
+encoders = joblib.load("models/encoders.joblib")
+scaler = joblib.load("models/scaler.joblib")
+categorical_cols = joblib.load("models/categorical_columns.joblib")
+boolean_cols = joblib.load("models/boolean_columns.joblib")
+feature_columns = joblib.load("models/feature_columns.joblib")
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y if len(np.unique(y)) > 1 else None
+)
 
 def evaluate(model):
     preds = model.predict(X_test)
     acc = accuracy_score(y_test, preds)
-    f1 = f1_score(y_test, preds, average='weighted')
-    
-    try:
-        if len(set(y_test)) == 2:
-            auc = roc_auc_score(y_test, preds)
-        else:
-            auc = roc_auc_score(y_test, preds, multi_class='ovr', average='weighted')
-    except:
-        auc = 0.0
-    
+    f1 = f1_score(y_test, preds)
+    auc = roc_auc_score(y_test, preds)
     return acc, f1, auc
 
-def ridge(trial):
-    a = trial.suggest_float('alpha', 0.001, 10.0, log=True)
-    m = RidgeClassifier(alpha=a).fit(X_train, y_train)
-    acc, _, _ = evaluate(m)
+# Optuna objectives
+def ridge_opt(trial):
+    alpha = trial.suggest_float("alpha", 1e-3, 10.0, log=True)
+    model = RidgeClassifier(alpha=alpha)
+    model.fit(X_train, y_train)
+    acc, _, _ = evaluate(model)
     return 1 - acc
 
-r = optuna.create_study(direction='minimize')
-r.optimize(ridge, n_trials=10, show_progress_bar=True)
-ridge_model = RidgeClassifier(alpha=r.best_params['alpha']).fit(X_train, y_train)
-ridge_acc, ridge_f1, ridge_auc = evaluate(ridge_model)
-
-print(f"RidgeClassifier - Acc: {ridge_acc:.4f}, F1: {ridge_f1:.4f}, AUC: {ridge_auc:.4f}")
-
-def dt(trial):
-    d = trial.suggest_int('max_depth', 2, 20)
-    s = trial.suggest_int('min_samples_split', 2, 10)
-    m = DecisionTreeClassifier(max_depth=d, min_samples_split=s, random_state=42).fit(X_train, y_train)
-    acc, _, _ = evaluate(m)
+def dt_opt(trial):
+    md = trial.suggest_int("max_depth", 2, 20)
+    mss = trial.suggest_int("min_samples_split", 2, 10)
+    model = DecisionTreeClassifier(max_depth=md, min_samples_split=mss)
+    model.fit(X_train, y_train)
+    acc, _, _ = evaluate(model)
     return 1 - acc
 
-t = optuna.create_study(direction='minimize')
-t.optimize(dt, n_trials=10, show_progress_bar=True)
-dt_model = DecisionTreeClassifier(**t.best_params, random_state=42).fit(X_train, y_train)
-dt_acc, dt_f1, dt_auc = evaluate(dt_model)
+def run_training():
+    wandb.login(key=WANDB_API_KEY)
+    run = wandb.init(project=WANDB_PROJECT, job_type="train")
 
-print(f"DecisionTreeClassifier - Acc: {dt_acc:.4f}, F1: {dt_f1:.4f}, AUC: {dt_auc:.4f}")
+    # Ridge tuning
+    ridge_study = optuna.create_study(direction="minimize")
+    ridge_study.optimize(ridge_opt, n_trials=15)
+    best_alpha = ridge_study.best_params["alpha"]
 
-if ridge_acc > dt_acc:
-    best_model, best_name = ridge_model, 'RidgeClassifier'
-    best_acc, best_f1, best_auc = ridge_acc, ridge_f1, ridge_auc
-    best_params = r.best_params
-else:
-    best_model, best_name = dt_model, 'DecisionTreeClassifier'
-    best_acc, best_f1, best_auc = dt_acc, dt_f1, dt_auc
-    best_params = t.best_params
+    ridge = RidgeClassifier(alpha=best_alpha)
+    ridge.fit(X_train, y_train)
+    r_acc, r_f1, r_auc = evaluate(ridge)
 
-print(f"\n🏆 Best Model: {best_name}")
-print(f"Accuracy: {best_acc:.4f}, F1: {best_f1:.4f}, AUC: {best_auc:.4f}")
+    # DT tuning
+    dt_study = optuna.create_study(direction="minimize")
+    dt_study.optimize(dt_opt, n_trials=15)
+    dt_params = dt_study.best_params
 
-# Log to MLflow
-with mlflow.start_run(run_name=best_name):
-    mlflow.log_params({'model': best_name, **best_params})
-    mlflow.log_metrics({
-        'Accuracy': best_acc,
-        'F1_Score': best_f1,
-        'ROC_AUC': best_auc
-    })
-    mlflow.sklearn.log_model(best_model, 'model')
+    dt = DecisionTreeClassifier(**dt_params)
+    dt.fit(X_train, y_train)
+    d_acc, d_f1, d_auc = evaluate(dt)
 
-os.makedirs('models', exist_ok=True)
-joblib.dump(best_model, 'models/best_model.joblib')
-
-api = HfApi()
-repo, token = os.getenv('HF_MODEL_REPO'), os.getenv('HF_TOKEN')
-
-files_to_upload = [
-    ('models/best_model.joblib', 'best_model.joblib'),
-    ('models/encoders.joblib', 'models/encoders.joblib'),
-    ('models/scaler.joblib', 'models/scaler.joblib'),
-    ('models/feature_columns.joblib', 'models/feature_columns.joblib'),
-    ('models/categorical_columns.joblib', 'models/categorical_columns.joblib'),
-    ('models/boolean_columns.joblib', 'models/boolean_columns.joblib')
-]
-
-for local_path, hf_path in files_to_upload:
-    if os.path.exists(local_path):
-        api.upload_file(
-            path_or_fileobj=local_path,
-            path_in_repo=hf_path,
-            repo_id=repo,
-            repo_type='model',
-            token=token
-        )
-        print(f"✅ Uploaded {hf_path}")
+    # Pick best
+    if r_acc > d_acc:
+        best_model = ridge
+        best_name = "RidgeClassifier"
+        metrics = {"accuracy": r_acc, "f1": r_f1, "auc": r_auc, "alpha": best_alpha}
     else:
-        print(f"⚠️  Warning: {local_path} not found, skipping upload")
+        best_model = dt
+        best_name = "DecisionTreeClassifier"
+        metrics = {"accuracy": d_acc, "f1": d_f1, "auc": d_auc, **dt_params}
 
-print('✅ Model training and upload complete.')
+    os.makedirs("models", exist_ok=True)
+    joblib.dump(best_model, "models/best_model.joblib")
+
+    # Log to wandb
+    run.summary.update({"best_model": best_name, **metrics})
+    art = wandb.Artifact("best_model", type="model")
+    art.add_file("models/best_model.joblib")
+    art.add_file("models/encoders.joblib")
+    art.add_file("models/scaler.joblib")
+    art.add_file("models/categorical_columns.joblib")
+    art.add_file("models/boolean_columns.joblib")
+    art.add_file("models/feature_columns.joblib")
+    run.log_artifact(art)
+    run.finish()
+
+    # Upload to HF for serving
+    api = HfApi()
+    file_map = {
+        "models/best_model.joblib": "best_model.joblib",
+        "models/encoders.joblib": "models/encoders.joblib",
+        "models/scaler.joblib": "models/scaler.joblib",
+        "models/categorical_columns.joblib": "models/categorical_columns.joblib",
+        "models/boolean_columns.joblib": "models/boolean_columns.joblib",
+        "models/feature_columns.joblib": "models/feature_columns.joblib",
+    }
+
+    for local, remote in file_map.items():
+        api.upload_file(
+            path_or_fileobj=local,
+            path_in_repo=remote,
+            repo_id=HF_MODEL_REPO,
+            repo_type="model",
+            token=HF_TOKEN,
+        )
+
+if __name__ == "__main__":
+    run_training()

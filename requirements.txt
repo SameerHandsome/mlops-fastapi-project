@@ -2,10 +2,9 @@ pandas
 scikit-learn
 joblib
 optuna
+huggingface-hub
 fastapi
 uvicorn
-huggingface-hub
 prometheus_client
-requests
+evidently==0.4.33
 wandb
-evidently>=0.4.0

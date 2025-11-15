@@ -8,4 +8,4 @@ huggingface-hub
 prometheus_client
 requests
 wandb
-evidently
+evidently>=0.4.0

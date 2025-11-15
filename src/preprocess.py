@@ -49,3 +49,4 @@ print(f"Categorical columns (string): {categorical_cols}")
 print(f"Boolean columns (True/False): {boolean_cols}")
 print(f"Feature columns: {X.columns.tolist()}")
 print(f"X shape: {X.shape}, y shape: {y.shape}")
+

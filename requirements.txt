@@ -1,10 +1,11 @@
 pandas
 scikit-learn
 joblib
-mlflow
 optuna
-huggingface-hub
 fastapi
 uvicorn
+huggingface-hub
 prometheus_client
+requests
+wandb
 evidently

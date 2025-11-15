@@ -22,7 +22,6 @@ jobs:
       
       - name: Train model
         env:
-          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_MODEL_REPO: ${{ secrets.HF_MODEL_REPO }}
@@ -30,5 +29,6 @@ jobs:
       
       - name: Generate drift report
         env:
-          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+          WANDB_PROJECT: ${{ secrets.WANDB_PROJECT }}
         run: python src/drift_report.py
